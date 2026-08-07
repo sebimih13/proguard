@@ -246,6 +246,9 @@ public class KotlinShrinker
                             new MemberAccessFlagCleaner(AccessConstants.PRIVATE),
                             new MemberAccessSetter(visibility)));
         }
+
+        shrinkAnnotations(kotlinPropertyMetadata.annotations);
+        shrinkAnnotations(kotlinPropertyMetadata.backingFieldAnnotations);
     }
 
     // Implementations for KotlinFunctionVisitor.
