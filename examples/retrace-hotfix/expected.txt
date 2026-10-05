@@ -1,0 +1,10 @@
+Java frames: (J=compiled Java code, j=interpreted, Vv=VM code)
+J 13199  org.cef.CefApp.N_DoMessageLoopWork()V (0 bytes) @ 0x00007f377b64f460 [0x00007f377b64f420+0x0000000000000040]
+J 13197 c1 org.cef.CefApp$$Lambda$723+0x0000000801317878.run()V (8 bytes) @ 0x00007f37755b8d7c [0x00007f37755b8cc0+0x00000000000000bc]
+J 17109 jvmci org.eclipse.swt.widgets.Display.readAndDispatch()Z (88 bytes) @ 0x00007f377b986180 [0x00007f377b985ee0+0x00000000000002a0]
+j  ceva.altceva.test.MessageLoop.dispatch(J)V+24
+j  ceva.altceva.test.CollectionImporter.importAll(ZLjava/util/Collection;)V+137
+j  ceva.altceva.test.ObjectionImporter.importCollection(Ljava/util/Collection;)V+3
+j  ceva.altceva.test.ObjectionImporter.importArray([Lceva/altceva/test/Objection;)V+5
+java.lang.NullPointerException: Cannot invoke "ceva.altceva.ui.views.registers.IRegistersViewModel.getTreeElementsForRoot(Object)" because "this.viewModel" is null
+	at ceva.altceva.ui.views.registers.RegistersView.getTreeElementsForRoot(RegistersView.java:690)

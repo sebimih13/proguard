@@ -26,3 +26,8 @@ include 'ant'
 include 'annotations'
 
 project(':gradle-plugin').name = 'gradle'
+
+// Opt in to building against the sibling ProGuardCORE checkout.
+if (providers.gradleProperty('localProguardCore').isPresent()) {
+    includeBuild('../proguard-core')
+}

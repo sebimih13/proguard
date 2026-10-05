@@ -1,0 +1,15 @@
+ceva.altceva.test.MessageLoop -> ceva.altceva.test.q:
+    void dispatch(long) -> a
+    void other(int) -> a
+ceva.altceva.test.CollectionImporter -> ceva.altceva.test.p:
+    void importAll(boolean,java.util.Collection) -> a
+ceva.altceva.test.ObjectionImporter -> ceva.altceva.test.l:
+    void importCollection(java.util.Collection) -> a
+    void importArray(ceva.altceva.test.Objection[]) -> a
+ceva.altceva.test.Objection -> ceva.altceva.test.Objection:
+ceva.altceva.ui.views.registers.IRegistersViewModel -> ceva.altceva.ui.views.registers.b:
+    java.lang.Object getTreeElementsForRoot(java.lang.Object) -> a
+    java.lang.Object getByIndex(int) -> a
+ceva.altceva.ui.views.registers.RegistersView -> ceva.altceva.ui.views.registers.RegistersView:
+    ceva.altceva.ui.views.registers.IRegistersViewModel viewModel -> f
+    690:690:java.lang.Object getTreeElementsForRoot():690:690 -> getTreeElementsForRoot

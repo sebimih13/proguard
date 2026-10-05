@@ -162,13 +162,32 @@ public class ReTrace
         mappingReader.pump(mapper);
 
         // Read and process the lines of the stack trace.
+        String pendingLine = null;
+        boolean defaultPatterns = REGULAR_EXPRESSION.equals(regularExpression) &&
+                                  REGULAR_EXPRESSION2.equals(regularExpression2);
         while (true)
         {
-            // Read a line.
-            String obfuscatedLine = stackTraceReader.readLine();
+            // A helpful NPE needs one frame of lookahead to resolve this.field.
+            String obfuscatedLine = pendingLine != null ? pendingLine : stackTraceReader.readLine();
+            pendingLine = null;
             if (obfuscatedLine == null)
             {
                 break;
+            }
+
+            if (defaultPatterns)
+            {
+                String diagnostic = DiagnosticRemapper.hotspot(obfuscatedLine, mapper);
+                if (DiagnosticRemapper.isHelpfulNullPointer(obfuscatedLine))
+                {
+                    pendingLine = stackTraceReader.readLine();
+                    diagnostic = DiagnosticRemapper.helpfulNullPointer(obfuscatedLine, pendingLine, mapper);
+                }
+                if (diagnostic != null)
+                {
+                    stackTraceWriter.println(allClassNames ? deobfuscateTokens(diagnostic, mapper) : diagnostic);
+                    continue;
+                }
             }
 
             // Try to match it against the regular expression.
