@@ -1,0 +1,60 @@
+{
+  "fixture": "synthetic class entries with randomized constants and bytecode",
+  "jarBytes": 301333460,
+  "classCount": 19409,
+  "java": "openjdk version \"17.0.20.1\" 2026-08-18",
+  "heap": "-Xms32m -Xmx512m",
+  "runs": 3,
+  "results": {
+    "eager": {
+      "medianElapsedSeconds": 1.34,
+      "medianLoaderMs": 1320.930941,
+      "medianPeakRssKB": 209884,
+      "samples": [
+        {
+          "loaderMs": 1394.927303,
+          "parsedClasses": 19409,
+          "elapsedSeconds": 1.41,
+          "peakRssKB": 201108
+        },
+        {
+          "loaderMs": 1320.858431,
+          "parsedClasses": 19409,
+          "elapsedSeconds": 1.34,
+          "peakRssKB": 216464
+        },
+        {
+          "loaderMs": 1320.930941,
+          "parsedClasses": 19409,
+          "elapsedSeconds": 1.34,
+          "peakRssKB": 209884
+        }
+      ]
+    },
+    "onDemand": {
+      "medianElapsedSeconds": 0.05,
+      "medianLoaderMs": 35.798776,
+      "medianPeakRssKB": 62852,
+      "samples": [
+        {
+          "loaderMs": 35.798776,
+          "parsedClasses": 1,
+          "elapsedSeconds": 0.05,
+          "peakRssKB": 62852
+        },
+        {
+          "loaderMs": 37.209492,
+          "parsedClasses": 1,
+          "elapsedSeconds": 0.05,
+          "peakRssKB": 62688
+        },
+        {
+          "loaderMs": 34.115408,
+          "parsedClasses": 1,
+          "elapsedSeconds": 0.05,
+          "peakRssKB": 63176
+        }
+      ]
+    }
+  }
+}

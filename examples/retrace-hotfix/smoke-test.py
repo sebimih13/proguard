@@ -58,3 +58,48 @@ with tempfile.TemporaryDirectory(prefix="retrace-inheritance-") as temporary:
         for text in expected:
             assert text in result.stdout, f"{case}: missing {text}\n{crash.stderr}\n{result.stdout}"
         print(f"PASS {case}: {result.stdout.splitlines()[0]}")
+
+# Validate actual optimizer inlining, including the complete reconstructed chain.
+with tempfile.TemporaryDirectory(prefix="retrace-optimized-") as temporary:
+    work = pathlib.Path(temporary)
+    classes = work / "classes"
+    classes.mkdir()
+    run("javac", "--release", "8", "-g", "-d", classes, EXAMPLES / "OptimizedCrash.java")
+    injar = work / "input.jar"
+    with zipfile.ZipFile(injar, "w") as archive:
+        for source in classes.rglob("*.class"):
+            archive.write(source, source.relative_to(classes).as_posix())
+    for label, optimizations in [("inlining", "method/inlining/*"),
+                                 ("optimized", "!method/marking/private,!method/removal/parameter")]:
+        outjar = work / (label + ".jar")
+        mapping = work / (label + ".mapping.txt")
+        config = work / (label + ".pro")
+        config.write_text(
+            f"-injars '{injar}'\n-outjars '{outjar}'\n"
+            f"-libraryjars '{java_home / 'jmods/java.base.jmod'}'(!**.jar;!module-info.class)\n"
+            f"-optimizationpasses 3\n-optimizations {optimizations}\n"
+            "-keep,allowoptimization public class demo.OptimizedCrash { public static void main(java.lang.String[]); }\n"
+            "-keepclassmembers,allowobfuscation class demo.OptimizedCrash$State { <fields>; }\n"
+            "-keepclassmembers,allowobfuscation class demo.OptimizedCrash { <fields>; }\n"
+            "-keep,allowobfuscation interface demo.OptimizedCrash$Target { <methods>; }\n"
+            "-keepattributes SourceFile,LineNumberTable,LocalVariableTable\n"
+            f"-printmapping '{mapping}'\n"
+        )
+        run("java", "-jar", ROOT / "lib/proguard.jar", f"@{config}")
+        # Confirm the helper methods were removed, rather than just testing an
+        # optimized build that happened to retain its original call stack.
+        bytecode = run("javap", "-p", "-classpath", outjar, "demo.OptimizedCrash").stdout
+        assert "leaf(" not in bytecode and "bridge(" not in bytecode and "entry(" not in bytecode, bytecode
+        crash = run("java", "-XX:+ShowCodeDetailsInExceptionMessages", "-cp", outjar,
+                    "demo.OptimizedCrash", check=False)
+        assert crash.returncode != 0 and "NullPointerException" in crash.stderr, crash.stderr
+        trace = work / "trace.txt"
+        trace.write_text(crash.stderr)
+        result = run("java", "-jar", ROOT / "lib/retrace.jar", "-injars", outjar, mapping, trace)
+        assert "demo.OptimizedCrash$Target.mappedCall()" in result.stdout, result.stdout
+        assert '.field" is null' in result.stdout, result.stdout
+        frame_lines = [line for line in result.stdout.splitlines() if line.lstrip().startswith("at ")]
+        for method, frame in zip(["leaf", "bridge", "entry", "main"], frame_lines):
+            assert f"demo.OptimizedCrash.{method}(" in frame, result.stdout
+        assert len(frame_lines) == 4, result.stdout
+        print(f"PASS {label}: restored leaf -> bridge -> entry -> main, and the null field")

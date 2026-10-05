@@ -34,60 +34,138 @@ import java.util.stream.Stream;
 import java.util.zip.*;
 
 /** Class-file metadata for diagnostic field lookup. Never loads or executes classes. */
-final class DiagnosticClassPool
+final class DiagnosticClassPool implements AutoCloseable
 {
     private final Map<String, ClassInfo> classes = new HashMap<String, ClassInfo>();
+    private final Map<String, ClassSource> sources = new HashMap<String, ClassSource>();
+    private final Set<String> missing = new HashSet<String>();
+    private final List<ZipFile> archives = new ArrayList<ZipFile>();
 
     DiagnosticClassPool(List<File> inputs) throws IOException
     {
-        for (File input : inputs)
+        try
         {
-            if (input.isDirectory())
+            for (File input : inputs)
             {
-                try (Stream<Path> paths = Files.walk(input.toPath()))
+                if (input.isDirectory())
                 {
-                    Iterator<Path> iterator = paths.filter(p -> p.toString().endsWith(".class")).iterator();
-                    while (iterator.hasNext())
+                    Path root = input.toPath();
+                    try (Stream<Path> paths = Files.walk(root))
                     {
-                        try (InputStream stream = Files.newInputStream(iterator.next())) { read(stream); }
+                        Iterator<Path> iterator = paths.filter(p -> p.toString().endsWith(".class")).iterator();
+                        while (iterator.hasNext())
+                        {
+                            Path path = iterator.next();
+                            add(root.relativize(path).toString().replace(File.separatorChar, '/'), new ClassSource(path));
+                        }
                     }
                 }
-            }
-            else if (input.getName().endsWith(".class"))
-            {
-                try (InputStream stream = new FileInputStream(input)) { read(stream); }
-            }
-            else
-            {
-                try (ZipFile zip = new ZipFile(input))
+                else if (input.getName().endsWith(".class"))
                 {
+                    // A standalone file has no classpath-relative name.
+                    try (InputStream stream = Files.newInputStream(input.toPath()))
+                    {
+                        ProgramClass clazz = read(stream);
+                        add(clazz.getName() + ".class", new ClassSource(input.toPath()));
+                        index(clazz);
+                    }
+                }
+                else
+                {
+                    ZipFile zip = new ZipFile(input);
+                    archives.add(zip);
                     Enumeration<? extends ZipEntry> entries = zip.entries();
                     while (entries.hasMoreElements())
                     {
                         ZipEntry entry = entries.nextElement();
-                        if (!entry.getName().endsWith(".class")) continue;
-                        // There is no target runtime version in a stack trace.
-                        if (entry.getName().startsWith("META-INF/versions/"))
+                        String name = entry.getName();
+                        if (!name.endsWith(".class")) continue;
+                        if (name.startsWith("META-INF/versions/"))
                             throw new IOException("Multi-release input requires extracted runtime classes: " + input);
-                        try (InputStream stream = zip.getInputStream(entry)) { read(stream); }
+                        if (input.getName().endsWith(".jmod"))
+                        {
+                            if (!name.startsWith("classes/")) continue;
+                            name = name.substring("classes/".length());
+                        }
+                        add(name, new ClassSource(zip, entry));
                     }
                 }
             }
         }
+        catch (IOException | RuntimeException ex)
+        {
+            try { close(); } catch (IOException closeError) { ex.addSuppressed(closeError); }
+            throw ex;
+        }
     }
 
-    private void read(InputStream stream) throws IOException
+    private void add(String entryName, ClassSource source) throws IOException
+    {
+        String name = entryName.substring(0, entryName.length() - ".class".length()).replace('/', '.');
+        if (name.equals("module-info")) return;
+        if (sources.putIfAbsent(name, source) != null) throw new IOException("Duplicate diagnostic class: " + name);
+    }
+
+    private static ProgramClass read(InputStream stream) throws IOException
     {
         ProgramClass clazz = new ProgramClass();
         try
         {
             clazz.accept(new ProgramClassReader(new DataInputStream(new BufferedInputStream(stream))));
-            index(clazz);
+            return clazz;
         }
         catch (RuntimeException ex)
         {
             throw new IOException("Cannot read diagnostic class file", ex);
         }
+    }
+
+    private ClassInfo get(String name) throws IOException
+    {
+        ClassInfo cached = classes.get(name);
+        if (cached != null || missing.contains(name)) return cached;
+        ClassSource source = sources.get(name);
+        if (source == null) { missing.add(name); return null; }
+        try (InputStream stream = source.open())
+        {
+            ProgramClass clazz = read(stream);
+            if (!ClassUtil.externalClassName(clazz.getName()).equals(name))
+                throw new IOException("Class name does not match diagnostic input path: " + name);
+            try { index(clazz); }
+            catch (RuntimeException ex) { throw new IOException("Cannot index diagnostic class " + name, ex); }
+        }
+        return classes.get(name);
+    }
+
+    int parsedClassCount() { return classes.size(); }
+    int indexedClassCount() { return sources.size(); }
+
+    @Override
+    public void close() throws IOException
+    {
+        IOException failure = null;
+        for (ZipFile archive : archives)
+        {
+            try { archive.close(); }
+            catch (IOException ex)
+            {
+                if (failure == null) failure = ex;
+                else failure.addSuppressed(ex);
+            }
+        }
+        archives.clear();
+        if (failure != null) throw failure;
+    }
+
+    private static final class ClassSource
+    {
+        final Path path;
+        final ZipFile zip;
+        final ZipEntry entry;
+
+        ClassSource(Path path) { this.path = path; this.zip = null; this.entry = null; }
+        ClassSource(ZipFile zip, ZipEntry entry) { this.path = null; this.zip = zip; this.entry = entry; }
+        InputStream open() throws IOException { return path == null ? zip.getInputStream(entry) : Files.newInputStream(path); }
     }
 
     private void index(ProgramClass clazz) throws IOException
@@ -119,10 +197,16 @@ final class DiagnosticClassPool
                 if (!(method.attributes[attributeIndex] instanceof CodeAttribute)) continue;
                 CodeAttribute code = (CodeAttribute)method.attributes[attributeIndex];
                 LineNumberTableAttribute lines = (LineNumberTableAttribute)code.getAttribute(clazz, Attribute.LINE_NUMBER_TABLE);
+                LocalVariableTableAttribute locals = (LocalVariableTableAttribute)code.getAttribute(clazz, Attribute.LOCAL_VARIABLE_TABLE);
+                if (locals != null)
+                    for (int localIndex = 0; localIndex < locals.u2localVariableTableLength; localIndex++)
+                        methodInfo.locals.add(locals.localVariableTable[localIndex].getName(clazz));
+                if (lines != null)
+                    for (int lineIndex = 0; lineIndex < lines.u2lineNumberTableLength; lineIndex++)
+                        methodInfo.lines.add(lines.lineNumberTable[lineIndex].u2lineNumber);
                 for (int offset = 0; offset < code.u4codeLength;)
                 {
                     Instruction instruction = InstructionFactory.create(code.code, offset);
-                    if (lines != null) methodInfo.lines.add(lines.getLineNumber(offset));
                     if (instruction instanceof ConstantInstruction)
                     {
                         int constantIndex = ((ConstantInstruction)instruction).constantIndex;
@@ -143,17 +227,17 @@ final class DiagnosticClassPool
         classes.put(name, info);
     }
 
-    boolean contains(String name) { return classes.containsKey(name); }
+    boolean contains(String name) { return sources.containsKey(name); }
 
     /**
      * Returns candidates from the throwing method, or null without a matching
      * method context. Examine the whole method: a null producer can precede the
      * throwing source line. Use source lines only to select method overloads.
      */
-    List<FieldInfo> referencedFields(FrameInfo context, String name, boolean staticOnly)
+    List<FieldInfo> referencedFields(FrameInfo context, String name, boolean staticOnly) throws IOException
     {
         if (context == null) return null;
-        ClassInfo clazz = classes.get(context.getClassName());
+        ClassInfo clazz = get(context.getClassName());
         if (clazz == null) return null;
         Map<String, FieldInfo> result = new LinkedHashMap<String, FieldInfo>();
         boolean foundMethod = false;
@@ -166,7 +250,7 @@ final class DiagnosticClassPool
             foundMethod = true;
             for (FieldInfo reference : method.references)
             {
-                if (!reference.name.equals(name) || staticOnly && !reference.isStatic) continue;
+                if (!reference.name.equals(name) || reference.isStatic != staticOnly) continue;
                 List<FieldInfo> declarations = new ArrayList<FieldInfo>();
                 if (!resolve(reference.owner, reference.name, reference.type, new HashSet<String>(), declarations) ||
                     declarations.isEmpty()) return Collections.emptyList();
@@ -180,11 +264,43 @@ final class DiagnosticClassPool
         return foundMethod || foundName ? new ArrayList<FieldInfo>(result.values()) : null;
     }
 
-    /** JVM field-reference lookup: name AND descriptor, interfaces before superclass. */
-    private boolean resolve(String owner, String name, String type, Set<String> visited, List<FieldInfo> result)
+    /** Debug local names take precedence over coincidentally mapped class names. */
+    boolean isLocal(FrameInfo context, String name) throws IOException
+    {
+        if (context == null) return false;
+        ClassInfo clazz = get(context.getClassName());
+        if (clazz == null) return false;
+        for (MethodInfo method : clazz.methods)
+            if (method.name.equals(context.getMethodName()) &&
+                (context.getLineNumber() == 0 || method.lines.isEmpty() || method.lines.contains(context.getLineNumber())) &&
+                method.locals.contains(name)) return true;
+        return false;
+    }
+
+    /** Returns possible declaring owners for an inherited method, conservatively. */
+    List<String> methodOwners(String owner, String name) throws IOException
+    {
+        List<String> owners = new ArrayList<String>();
+        return collectMethods(owner, name, new HashSet<String>(), owners) ? owners : Collections.<String>emptyList();
+    }
+
+    private boolean collectMethods(String owner, String name, Set<String> visited, List<String> owners) throws IOException
     {
         if (!visited.add(owner)) return true;
-        ClassInfo clazz = classes.get(owner);
+        ClassInfo clazz = get(owner);
+        if (clazz == null) return owner.equals("java.lang.Object");
+        for (MethodInfo method : clazz.methods)
+            if (method.name.equals(name)) { owners.add(owner); break; }
+        boolean complete = true;
+        for (String parent : clazz.parents) complete &= collectMethods(parent, name, visited, owners);
+        return complete;
+    }
+
+    /** JVM field-reference lookup: name AND descriptor, interfaces before superclass. */
+    private boolean resolve(String owner, String name, String type, Set<String> visited, List<FieldInfo> result) throws IOException
+    {
+        if (!visited.add(owner)) return true;
+        ClassInfo clazz = get(owner);
         if (clazz == null) return owner.equals("java.lang.Object");
         for (FieldInfo field : clazz.fields)
         {
@@ -207,7 +323,7 @@ final class DiagnosticClassPool
      * Java source lookup rules. Collect every possible declaration instead of
      * guessing the first match. Missing hierarchy nodes make lookup inconclusive.
      */
-    List<FieldInfo> fields(String owner, String name, boolean staticOnly)
+    List<FieldInfo> fields(String owner, String name, boolean staticOnly) throws IOException
     {
         List<FieldInfo> result = new ArrayList<FieldInfo>();
         if (!collect(owner, name, staticOnly, new HashSet<String>(), result)) return Collections.emptyList();
@@ -215,10 +331,10 @@ final class DiagnosticClassPool
     }
 
     private boolean collect(String owner, String name, boolean staticOnly,
-                            Set<String> visited, List<FieldInfo> result)
+                            Set<String> visited, List<FieldInfo> result) throws IOException
     {
         if (!visited.add(owner)) return true;
-        ClassInfo info = classes.get(owner);
+        ClassInfo info = get(owner);
         if (info == null) return owner.equals("java.lang.Object");
         for (FieldInfo field : info.fields)
             if (field.name.equals(name) && (!staticOnly || field.isStatic)) result.add(field);
@@ -256,6 +372,7 @@ final class DiagnosticClassPool
     {
         final String name;
         final Set<Integer> lines = new HashSet<Integer>();
+        final Set<String> locals = new HashSet<String>();
         final List<FieldInfo> references = new ArrayList<FieldInfo>();
 
         MethodInfo(String name) { this.name = name; }

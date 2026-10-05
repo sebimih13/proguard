@@ -54,7 +54,7 @@ public class ReTrace
     private static final String REGULAR_EXPRESSION_OPTIONAL_SOURCE_LINE_INFO = "(?:\\+\\s+[0-9]+)?";
 
     // For example: "    at com.example.Foo.bar(Foo.java:123:0) ~[0]"
-    private static final String REGULAR_EXPRESSION_AT               = ".*?\\bat\\s+" + REGULAR_EXPRESSION_CLASS_METHOD + "\\s*" + REGULAR_EXPRESSION_OPTIONAL_SOURCE_LINE_INFO + REGULAR_EXPRESSION_SOURCE_LINE;
+    private static final String REGULAR_EXPRESSION_AT               = ".*?\\bat\\s+(?:[^\\s()]+/)?" + REGULAR_EXPRESSION_CLASS_METHOD + "\\s*" + REGULAR_EXPRESSION_OPTIONAL_SOURCE_LINE_INFO + REGULAR_EXPRESSION_SOURCE_LINE;
 
     // For example: "java.lang.ClassCastException: com.example.Foo cannot be cast to com.example.Bar"
     // Every line can only have a single matched class, so we try to avoid
@@ -183,55 +183,57 @@ public class ReTrace
         // Read the mapping file.
         MappingReader mappingReader = new MappingReader(mappingFile);
         mappingReader.pump(mapper);
-        DiagnosticClassPool diagnosticClasses = diagnosticInputs.isEmpty() ? null :
-            new DiagnosticClassPool(diagnosticInputs);
-
-        // Read and process the lines of the stack trace.
-        String pendingLine = null;
-        boolean defaultPatterns = REGULAR_EXPRESSION.equals(regularExpression) &&
-                                  REGULAR_EXPRESSION2.equals(regularExpression2);
-        while (true)
+        try (DiagnosticClassPool diagnosticClasses = diagnosticInputs.isEmpty() ? null :
+             new DiagnosticClassPool(diagnosticInputs))
         {
-            // A helpful NPE needs one frame of lookahead to resolve this.field.
-            String obfuscatedLine = pendingLine != null ? pendingLine : stackTraceReader.readLine();
-            pendingLine = null;
-            if (obfuscatedLine == null)
+
+            // Read and process the lines of the stack trace.
+            String pendingLine = null;
+            boolean defaultPatterns = REGULAR_EXPRESSION.equals(regularExpression) &&
+                                      REGULAR_EXPRESSION2.equals(regularExpression2);
+            while (true)
             {
-                break;
+                // A helpful NPE needs one frame of lookahead to resolve this.field.
+                String obfuscatedLine = pendingLine != null ? pendingLine : stackTraceReader.readLine();
+                pendingLine = null;
+                if (obfuscatedLine == null)
+                {
+                    break;
+                }
+
+                if (defaultPatterns)
+                {
+                    String diagnostic = DiagnosticRemapper.hotspot(obfuscatedLine, mapper);
+                    if (DiagnosticRemapper.isHelpfulException(obfuscatedLine))
+                    {
+                        pendingLine = stackTraceReader.readLine();
+                        diagnostic = DiagnosticRemapper.helpfulException(obfuscatedLine, pendingLine, mapper, diagnosticClasses);
+                    }
+                    if (diagnostic != null)
+                    {
+                        // Structured diagnostics already remap their class references.
+                        // A second token pass can remap original names a second time
+                        // (and mistake local variable names for obfuscated classes).
+                        stackTraceWriter.println(diagnostic);
+                        continue;
+                    }
+                }
+
+                // Try to match it against the regular expression.
+                FrameInfo obfuscatedFrame1 = pattern1.parse(obfuscatedLine);
+                FrameInfo obfuscatedFrame2 = pattern2.parse(obfuscatedLine);
+
+                String deobf = handle(obfuscatedFrame1, mapper, pattern1, obfuscatedLine);
+                // DIRTY FIX:
+                // I have to execute it two times because recent Java stacktraces may have multiple fields/methods in the same line.
+                // For example: java.lang.NullPointerException: Cannot invoke "com.example.Foo.bar.foo(int)" because the return value of "com.example.Foo.bar.foo2()" is null
+                deobf = handle(obfuscatedFrame2, mapper, pattern2, deobf);
+
+                stackTraceWriter.println(deobf);
             }
 
-            if (defaultPatterns)
-            {
-                String diagnostic = DiagnosticRemapper.hotspot(obfuscatedLine, mapper);
-                if (DiagnosticRemapper.isHelpfulException(obfuscatedLine))
-                {
-                    pendingLine = stackTraceReader.readLine();
-                    diagnostic = DiagnosticRemapper.helpfulException(obfuscatedLine, pendingLine, mapper, diagnosticClasses);
-                }
-                if (diagnostic != null)
-                {
-                    // Structured diagnostics already remap their class references.
-                    // A second token pass can remap original names a second time
-                    // (and mistake local variable names for obfuscated classes).
-                    stackTraceWriter.println(diagnostic);
-                    continue;
-                }
-            }
-
-            // Try to match it against the regular expression.
-            FrameInfo obfuscatedFrame1 = pattern1.parse(obfuscatedLine);
-            FrameInfo obfuscatedFrame2 = pattern2.parse(obfuscatedLine);
-
-            String deobf = handle(obfuscatedFrame1, mapper, pattern1, obfuscatedLine);
-            // DIRTY FIX:
-            // I have to execute it two times because recent Java stacktraces may have multiple fields/methods in the same line.
-            // For example: java.lang.NullPointerException: Cannot invoke "com.example.Foo.bar.foo(int)" because the return value of "com.example.Foo.bar.foo2()" is null
-            deobf = handle(obfuscatedFrame2, mapper, pattern2, deobf);
-
-            stackTraceWriter.println(deobf);
+            stackTraceWriter.flush();
         }
-
-        stackTraceWriter.flush();
     }
 
     private String handle(FrameInfo obfuscatedFrame, FrameRemapper mapper, FramePattern pattern, String obfuscatedLine)

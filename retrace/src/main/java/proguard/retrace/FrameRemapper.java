@@ -136,15 +136,11 @@ public class FrameRemapper implements MappingProcessor
      * Transforms the obfuscated frame into one or more original frames,
      * if the frame contains information about a method that can be remapped.
      *
-     * Behaviour changed from stock ReTrace: when the obfuscated frame
-     * carries a concrete line number, we resolve it to the single method
-     * whose line range actually contains that line, and stop at the first
-     * such match. Methods without line numbers in the mapping (abstract or
-     * native declarations, whose ranges are 0) can never be a real stack
-     * frame, so they are skipped entirely whenever a line number is known.
-     * Only when the frame has no line number do we fall back to the original
-     * behaviour of listing every candidate, since there is then nothing to
-     * disambiguate on.
+     * When a concrete line number is present, only mappings with a containing
+     * line range are accepted. All such frames are retained in mapping order,
+     * since overlapping ranges encode an inlined call chain. Rangeless method
+     * declarations are still excluded from numbered frames. Without a line
+     * number, all candidates matching the supplied signature are retained.
      *
      * @param obfuscatedFrame      the obfuscated frame.
      * @param originalMethodFrames the list in which remapped frames can be
@@ -173,9 +169,7 @@ public class FrameRemapper implements MappingProcessor
                 String originalArguments   = obfuscatedArguments == null ? null :
                     originalArguments(obfuscatedArguments);
  
-                // Case 1: we have a concrete line number.
-                // Resolve to the first method whose line range contains it,
-                // ignoring rangeless (abstract / native) declarations.
+                // Numbered frames can expand to several inlined original frames.
                 if (obfuscatedLineNumber != 0)
                 {
                     for (MethodInfo methodInfo : methodSet)
@@ -184,25 +178,13 @@ public class FrameRemapper implements MappingProcessor
                                                    originalType,
                                                    originalArguments))
                         {
-                            // Apply the first match that has line numbers and stop.
                             originalMethodFrames.add(
                                 originalMethodFrame(obfuscatedFrame, methodInfo));
-                            return;
                         }
                     }
- 
-                    // No method with a matching line range was found. Emit
-                    // nothing here, so transform() falls back to a class-only
-                    // frame (keeping the obfuscated method name) rather than
-                    // listing every rangeless abstract candidate. This also
-                    // surfaces the genuinely useful signal that the concrete
-                    // owner of this line is missing from the mapping.
-                    //
-                    // If you would rather keep the stock "list all candidates"
-                    // behaviour as a fallback here, comment the following return
                     return;
                 }
- 
+
                 // Case 2: no line number to disambiguate on (e.g. native
                 // methods or "Unknown Source"). Keep the original behaviour and
                 // list every candidate.

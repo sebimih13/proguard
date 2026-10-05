@@ -18,7 +18,11 @@ class DiagnosticHierarchyTest
     private Path mapping;
     private static final String HEADER = "java.lang.NullPointerException: ";
     private static final String MAPPING =
+        "original.MappedClass -> a:\n" +
+        "original.Registry -> fixture.Registry:\n" +
+        "    original.Node sharedNode -> f\n" +
         "original.Parent -> fixture.Parent:\n" +
+        "    void inheritedMethod() -> m\n" +
         "    original.Model inheritedModel -> f\n" +
         "    original.Node head -> n\n" +
         "    original.Node[] items -> a\n" +
@@ -31,12 +35,14 @@ class DiagnosticHierarchyTest
         "    java.lang.Object hiddenObject -> f\n" +
         "original.Model -> fixture.Model:\n" +
         "    java.lang.Object lookup(java.lang.Object) -> m\n" +
+        "    original.Node node -> f\n" +
         "    original.Node node() -> n\n" +
         "original.Node -> fixture.Node:\n" +
         "    original.Node next -> n\n" +
         "    int count -> c\n" +
         "original.Root -> fixture.Root:\n" +
         "    original.Model shared -> i\n" +
+        "    void interfaceMethod() -> z\n" +
         "original.Left -> fixture.Left:\n" +
         "original.Right -> fixture.Right:\n" +
         "original.Diamond -> fixture.Diamond:\n" +
@@ -52,15 +58,17 @@ class DiagnosticHierarchyTest
         Files.write(mapping, MAPPING.getBytes(StandardCharsets.UTF_8));
         Path source = directory.resolve("Fixture.java");
         Files.write(source, ("package fixture;\n" +
-            "interface Root { Model i = null; }\n" +
+            "interface Root { Model i = null; default void z() {} }\n" +
             "interface Left extends Root {}\n" +
             "interface Right extends Root {}\n" +
             "interface Diamond extends Left, Right {}\n" +
             "interface Conflicting { Model i = null; }\n" +
             "class Collision implements Diamond, Conflicting {}\n" +
-            "class Model { Object m(Object o) { return null; } Node n() { return null; } }\n" +
+            "class Registry { static Node f; }\n" +
+            "class Model { Node f; Object m(Object o) { return null; } Node n() { return null; } }\n" +
             "class Node { Node n; int c; }\n" +
             "class Parent { Model f; Node n; Node[] a; Object l; " +
+            "void m() {} int collision(Model a) { Node marker = Registry.f; return a.f.c; } " +
             "Object cast() { return ((Hiding)this).f.m(null); } " +
             "int local(Node user) { return user.c; } " +
             "int localChain(Node user) { return user.n.c; } }\n" +
@@ -241,6 +249,65 @@ class DiagnosticHierarchyTest
         assertEquals(first, lines[0]);
         assertEquals(second.replace("this.l", "this.lock"), lines[1]);
         assertEquals(3, lines.length);
+    }
+
+    @Test void debugLocalNameIsNotReplacedByCoincidentallyMappedClass() throws IOException
+    {
+        String message = HEADER + "Cannot read field \"c\" because \"a.f\" is null";
+        String actual = retraceAt(message, "fixture.Parent.collision(Unknown Source)", classes.toFile());
+        assertEquals(HEADER + "Cannot read field \"count\" because \"a.node\" is null", actual);
+        assertFalse(actual.contains("original.MappedClass"));
+        assertFalse(actual.contains("sharedNode"));
+    }
+
+    @Test void inheritedClassAndInterfaceMethodsAreRemapped() throws IOException
+    {
+        assertEquals(HEADER + "Cannot invoke \"original.Child.inheritedMethod()\" because \"c\" is null",
+            retrace(HEADER + "Cannot invoke \"fixture.Child.m()\" because \"c\" is null", null));
+        assertEquals(HEADER + "Cannot invoke \"original.Child.interfaceMethod()\" because \"c\" is null",
+            retrace(HEADER + "Cannot invoke \"fixture.Child.z()\" because \"c\" is null", null));
+    }
+
+    @Test void nestedArrayIndexesPreserveIndexesAndRemapTheField() throws IOException
+    {
+        assertEquals(HEADER + "Cannot invoke \"String.length()\" because \"this.items[indexes[0]]\" is null",
+            retrace(HEADER + "Cannot invoke \"String.length()\" because \"this.a[indexes[0]]\" is null", "fixture.Child"));
+        assertTrue(retrace(HEADER + "Cannot invoke \"String.length()\" because \"this.a[indexes[0]][]\" is null", "fixture.Child")
+            .contains("this.items[indexes[0]][]"));
+        assertTrue(retrace(HEADER + "Cannot invoke \"String.length()\" because \"this.a[indexes[0]\" is null", "fixture.Child")
+            .contains("this.a[indexes[0]"));
+    }
+
+    @Test void archiveAndDirectoryClassesAreParsedOnDemandAndCached() throws IOException
+    {
+        for (File input : Arrays.asList(classes.toFile(), jar("lazy.jar", "")))
+        {
+            try (DiagnosticClassPool pool = new DiagnosticClassPool(Collections.singletonList(input)))
+            {
+                assertTrue(pool.indexedClassCount() > 5);
+                assertEquals(0, pool.parsedClassCount());
+                assertTrue(pool.contains("fixture.Child"));
+                assertEquals(0, pool.parsedClassCount());
+                assertEquals("fixture.Parent", pool.fields("fixture.Child", "f", false).get(0).owner);
+                int parsed = pool.parsedClassCount();
+                assertTrue(parsed < pool.indexedClassCount());
+                pool.fields("fixture.Child", "f", false);
+                pool.fields("missing.Class", "f", false);
+                pool.fields("missing.Class", "f", false);
+                assertEquals(parsed, pool.parsedClassCount());
+            }
+        }
+    }
+
+    @Test void unrelatedCorruptClassesAreNotParsed() throws IOException
+    {
+        Files.write(classes.resolve("fixture/Broken.class"), new byte[] {0, 1, 2});
+        try (DiagnosticClassPool pool = new DiagnosticClassPool(Collections.singletonList(jar("corrupt.jar", ""))))
+        {
+            assertEquals(0, pool.parsedClassCount());
+            assertFalse(pool.fields("fixture.Child", "f", false).isEmpty());
+            assertThrows(IOException.class, () -> pool.fields("fixture.Broken", "f", false));
+        }
     }
 
     private File jar(String name, String prefix) throws IOException

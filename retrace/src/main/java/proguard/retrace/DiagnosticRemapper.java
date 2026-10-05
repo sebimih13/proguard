@@ -22,6 +22,7 @@ package proguard.retrace;
 
 import proguard.classfile.util.ClassUtil;
 
+import java.io.IOException;
 import java.util.*;
 import java.util.regex.*;
 
@@ -82,14 +83,14 @@ final class DiagnosticRemapper
 
     /** Parses the message structure, independently of the exception class name. */
     static String helpfulException(String line, String nextLine, FrameRemapper mapper,
-                                   DiagnosticClassPool classes)
+                                   DiagnosticClassPool classes) throws IOException
     {
         Matcher message = HELPFUL.matcher(line);
         if (!message.matches()) return line;
         FrameInfo context = contextFrame(nextLine);
         String reason = message.group(5);
         Expression receiver = reason == null ? new Expression("", null) :
-            message.group(4) != null ? method(reason, mapper) : expression(reason, context, mapper, classes);
+            message.group(4) != null ? method(reason, mapper, classes) : expression(reason, context, mapper, classes);
 
         String action = message.group(3);
         Matcher field = ACTION_FIELD.matcher(action);
@@ -101,7 +102,7 @@ final class DiagnosticRemapper
         }
         else if (action.startsWith("Cannot invoke \""))
         {
-            action = "Cannot invoke \"" + method(action.substring(15, action.length() - 1), mapper).text + "\"";
+            action = "Cannot invoke \"" + method(action.substring(15, action.length() - 1), mapper, classes).text + "\"";
         }
         return message.group(1) + mapper.originalClassName(message.group(2)) + ": " + action +
                (reason == null ? "" : " because " + (message.group(4) == null ? "" : message.group(4)) +
@@ -130,7 +131,7 @@ final class DiagnosticRemapper
                              reference.substring(dot + 1), null);
     }
 
-    private static Expression method(String reference, FrameRemapper mapper)
+    private static Expression method(String reference, FrameRemapper mapper, DiagnosticClassPool classes) throws IOException
     {
         Matcher match = METHOD.matcher("\"" + reference + "\"");
         if (!match.matches()) return new Expression(reference, null);
@@ -148,6 +149,19 @@ final class DiagnosticRemapper
                 types.add(mapper.obfuscatedType(original.getType()));
             }
         }
+        if (candidates.isEmpty() && classes != null)
+        {
+            for (String declaringOwner : classes.methodOwners(owner, name))
+            {
+                FrameInfo inherited = new FrameInfo(declaringOwner, null, 0, null, null, name, null);
+                for (FrameInfo original : mapper.transform(inherited))
+                    if (argumentsMatch(arguments, original.getArguments(), mapper))
+                    {
+                        candidates.add(mapper.originalClassName(owner) + "." + original.getMethodName());
+                        types.add(mapper.obfuscatedType(original.getType()));
+                    }
+            }
+        }
         String target = candidates.size() == 1 ? candidates.iterator().next() :
                         mapper.originalClassName(owner) + "." + name;
         return new Expression(target + "(" + remapArguments(arguments, mapper) + ")",
@@ -156,7 +170,7 @@ final class DiagnosticRemapper
 
     /** Remaps each field in a typed chain; preserves locals and unknown suffixes. */
     private static Expression expression(String expression, FrameInfo context,
-                                         FrameRemapper mapper, DiagnosticClassPool classes)
+                                         FrameRemapper mapper, DiagnosticClassPool classes) throws IOException
     {
         int index;
         String type;
@@ -173,8 +187,12 @@ final class DiagnosticRemapper
         {
             // Longest known class prefix avoids treating a package component,
             // local variable placeholder, or arbitrary dotted text as an owner.
-            index = expression.length();
-            while ((index = expression.lastIndexOf('.', index - 1)) >= 0)
+            int rootEnd = 0;
+            while (rootEnd < expression.length() && expression.charAt(rootEnd) != '.' && expression.charAt(rootEnd) != '[') rootEnd++;
+            boolean local = rootEnd < expression.length() && expression.charAt(rootEnd) == '.' &&
+                            classes != null && classes.isLocal(context, expression.substring(0, rootEnd));
+            index = local ? -1 : expression.length();
+            while (!local && (index = expression.lastIndexOf('.', index - 1)) >= 0)
             {
                 String prefix = expression.substring(0, index);
                 if (mapper.hasClassMapping(prefix) || classes != null && classes.contains(prefix)) break;
@@ -201,7 +219,14 @@ final class DiagnosticRemapper
             char token = expression.charAt(index);
             if (token == '[')
             {
-                int end = expression.indexOf(']', index);
+                int end = index;
+                int depth = 0;
+                for (; end < expression.length(); end++)
+                {
+                    if (expression.charAt(end) == '[') depth++;
+                    else if (expression.charAt(end) == ']' && --depth == 0) break;
+                }
+                if (end == expression.length()) end = -1;
                 if (end < 0) return new Expression(expression, null);
                 result.append(expression, index, end + 1);
                 type = type != null && type.endsWith("[]") ? type.substring(0, type.length() - 2) : null;
@@ -224,7 +249,7 @@ final class DiagnosticRemapper
     }
 
     private static Expression field(String owner, String name, boolean staticOnly,
-                                    FrameInfo context, FrameRemapper mapper, DiagnosticClassPool classes)
+                                    FrameInfo context, FrameRemapper mapper, DiagnosticClassPool classes) throws IOException
     {
         if (classes != null)
         {

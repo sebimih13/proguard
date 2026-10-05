@@ -26,7 +26,13 @@ class DiagnosticRemapperTest
         "example.Ambiguous -> amb:\n" +
         "    java.lang.Object first(java.lang.Object) -> a\n" +
         "    java.lang.String second(java.lang.Object) -> a\n" +
-        "example.Value -> z:\n";
+        "example.Value -> z:\n" +
+        "example.Inlined -> inl:\n" +
+        "    void abstractMethod() -> a\n" +
+        "    3006:3006:void leaf():6:6 -> a\n" +
+        "    3006:3006:void bridge():7 -> a\n" +
+        "    3006:3006:void entry():8 -> a\n" +
+        "    3006:3006:void main(java.lang.String[]):13 -> a\n";
 
     private String retrace(String input) throws IOException
     {
@@ -107,6 +113,22 @@ class DiagnosticRemapperTest
     @Test void customRegexStillControlsParsing() throws IOException
     {
         assertEquals("j  a.b(J)V+24\n", retrace("j  a.b(J)V+24", "at %c.%m", "at %c.%m"));
+    }
+
+    @Test void moduleAndClassLoaderPrefixesArePreservedWhileFramesAreRemapped() throws IOException
+    {
+        for (String prefix : new String[] {"app/", "app//", "module@1/", "app/module@1/"})
+            assertEquals("\tat " + prefix + "example.View.render(View.java:42)\n",
+                         retrace("\tat " + prefix + "v.r(V.java:10)"));
+    }
+
+    @Test void numberedFramesExpandInlineChainsWithoutRangelessCandidates() throws IOException
+    {
+        assertEquals("\tat example.Inlined.leaf(Inlined.java:6)\n" +
+                     "\tat example.Inlined.bridge(Inlined.java:7)\n" +
+                     "\tat example.Inlined.entry(Inlined.java:8)\n" +
+                     "\tat example.Inlined.main(Inlined.java:13)\n",
+                     retrace("\tat inl.a(Inlined.java:3006)"));
     }
 
     @Test void regularFramesAndExceptionHeadersStillWork() throws IOException

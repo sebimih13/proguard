@@ -29,7 +29,11 @@ java -jar lib/retrace.jar -injars '/path/to/app.jar:/path/to/dependency.jar' /pa
 `-injars` accepts JAR/ZIP/JMOD files, class directories, and individual `.class`
 files. Use `:` to separate paths on Unix and `;` on Windows, or repeat `-injars`.
 Include dependencies that declare relevant inherited fields. These inputs are
-read as class-file data; their classes are never loaded or executed.
+indexed by classpath-relative entry name. Only classes needed by the diagnostic
+are parsed, and parsed/missing classes are cached for that invocation. JARs stay
+open during retracing and are closed afterward. Standalone `.class` inputs need
+an initial parse to discover their names. Classes are never loaded or executed.
+For directories, preserve the package directory structure.
 
 Duplicate classes are rejected, because the trace does not identify the defining
 class loader. Multi-release JARs require extracting the class versions used by
@@ -56,6 +60,18 @@ when it uses the same structure. It does not need to be a JVM-defined exception.
 | `local.field`, `<local1>.field`, `<parameter1>.field` | Bytecode can identify a unique field while preserving the local/parameter label. |
 | Plain local names, `<localN>`, `<parameterN>`, `null`, array indexes | Preserved; original local names or runtime values are not reconstructed. |
 | No-message NPEs, `requireNonNull`, Kotlin Intrinsics, Lombok, other free-form prose | Existing ordinary stack-frame processing applies. There is no universal parser for arbitrary exception text. |
+
+Method references inherited from superclasses or superinterfaces are looked up
+with `-injars` when the immediate owner has no matching method mapping. Loader and
+module prefixes on ordinary stack frames are preserved while the frame is
+retraced. Array indexes are parsed with balanced brackets, including nested
+expressions such as `this.items[indexes[0]]`.
+
+Debug local-variable names are checked before interpreting a mapped class prefix.
+Instance and static field accesses are distinguished, so a local named `a` is not
+replaced with an unrelated class or static field merely because a class was
+obfuscated to `a`. Without debug names, local and parameter placeholders are
+preserved.
 
 Method matching supports abbreviated `java.lang` arguments such as `Object`,
 primitives, and arrays. Ambiguous methods retain their obfuscated method name.
@@ -115,7 +131,12 @@ python3 examples/retrace-hotfix/smoke-test.py
 It compiles `InheritanceCrash.java`, obfuscates it using the local ProGuard JAR,
 generates real JVM exceptions, and retraces them using the resulting mapping and
 obfuscated JAR. It checks current-class fields, superclass fields, interface
-constants, array length, field reads/writes, synchronization, and hidden fields.
+constants, array length, field reads/writes, synchronization, and hidden fields. Two additional builds enable method inlining and a broader
+optimizer pass set. They verify that the helper methods were removed and that
+ReTrace restores every frame in the inlined `leaf -> bridge -> entry -> main`
+chain. The broader pass set excludes privatization and parameter removal to keep
+the fixture's JVM entry point callable. This validates that pass set, not every
+optimizer combination.
 Temporary files are automatically removed.
 
 JUnit tests also cover all listed array operations, throw/monitor actions,
@@ -126,5 +147,20 @@ The full ProGuard/ProGuardCORE test suites are not part of this focused test run
 The hs-error parser handles interpreted `j` and compiled `J` frames with `c1`,
 `c2`, or `jvmci` markers. JVM descriptors select overloads and are remapped while
 retaining their syntax. Bytecode offsets, compilation IDs, sizes, and native
-addresses are preserved. Existing custom line-range matching in `FrameRemapper`
-is unchanged.
+addresses are preserved. Numbered frame matching still excludes rangeless declarations,
+but now emits all matching numbered mappings in mapping order to restore inline
+chains. With no line number, candidate behavior is retained.
+
+## Large-input benchmark
+
+`benchmark-loading.py` creates about 300 MB of actual class entries with distinct
+names, randomized string constants, and method bytecode. It verifies cache reuse
+and records loading time and peak process memory:
+
+```sh
+python3 examples/retrace-hotfix/benchmark-loading.py --size-mb 300 --report /tmp/loading.json
+```
+
+To compare an earlier eager-loading build, add `--baseline /path/to/old/retrace.jar`.
+It requires Python 3.9+, a JDK, and Linux `/usr/bin/time`.
+See [performance.md](performance.md) for the measured comparison and its limits.
