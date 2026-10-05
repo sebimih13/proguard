@@ -34,6 +34,7 @@ public class FrameRemapper implements MappingProcessor
 {
     // Obfuscated class name -> original class name.
     private final Map<String,String>                      classMap       = new HashMap<String,String>();
+    private final Map<String,String>                      obfuscatedClassMap = new HashMap<String,String>();
 
     // Original class name -> obfuscated member name -> member info set.
     private final Map<String,Map<String,Set<FieldInfo>>>  classFieldMap  = new HashMap<String,Map<String,Set<FieldInfo>>>();
@@ -309,6 +310,38 @@ public class FrameRemapper implements MappingProcessor
     }
 
 
+    /** Whether a class name is explicitly present in the mapping. */
+    boolean hasClassMapping(String obfuscatedClassName)
+    {
+        return classMap.containsKey(obfuscatedClassName);
+    }
+
+
+    /** Converts a mapped type back to the class-file namespace for field chains. */
+    String obfuscatedType(String originalType)
+    {
+        int array = originalType.indexOf('[');
+        String name = array < 0 ? originalType : originalType.substring(0, array);
+        if (obfuscatedClassMap.containsKey(name))
+        {
+            String obfuscated = obfuscatedClassMap.get(name);
+            if (obfuscated == null) return null;
+            name = obfuscated;
+        }
+        return name + (array < 0 ? "" : originalType.substring(array));
+    }
+
+
+    /** Returns actual field mappings, without transform's class-only fallback. */
+    List<FrameInfo> fieldMappings(String owner, String name, String type)
+    {
+        List<FrameInfo> fields = new ArrayList<FrameInfo>();
+        transformFieldInfo(new FrameInfo(owner, null, 0, type, name, null, null),
+                           originalClassName(owner), fields);
+        return fields;
+    }
+
+
     /**
      * Returns the Java source file name that typically corresponds to the
      * given class name.
@@ -332,6 +365,14 @@ public class FrameRemapper implements MappingProcessor
     {
         // Obfuscated class name -> original class name.
         classMap.put(newClassName, className);
+        if (!obfuscatedClassMap.containsKey(className))
+        {
+            obfuscatedClassMap.put(className, newClassName);
+        }
+        else if (!newClassName.equals(obfuscatedClassMap.get(className)))
+        {
+            obfuscatedClassMap.put(className, null);
+        }
 
         return true;
     }

@@ -33,11 +33,12 @@ import java.util.*;
  */
 public class ReTrace
 {
-    private static final String USAGE                  = "Usage: java proguard.retrace.ReTrace [-regex <regex>] [-allclassnames] [-verbose] <mapping_file> [<stacktrace_file>]";
+    private static final String USAGE                  = "Usage: java proguard.retrace.ReTrace [-regex <regex>] [-allclassnames] [-verbose] [-injars <classpath>] <mapping_file> [<stacktrace_file>]";
     private static final String DEFAULT_REGEX          = "Default regex: ";
     private static final String REGEX_OPTION           = "-regex";
     private static final String ALL_CLASS_NAMES_OPTION = "-allclassnames";
     private static final String VERBOSE_OPTION         = "-verbose";
+    private static final String INJARS_OPTION          = "-injars";
 
     // For example: "com.example.Foo.bar"
     private static final String REGULAR_EXPRESSION_CLASS_METHOD     = "%c\\.%m";
@@ -103,6 +104,7 @@ public class ReTrace
     private final boolean allClassNames;
     private final boolean verbose;
     private final File    mappingFile;
+    private final List<File> diagnosticInputs;
 
 
     /**
@@ -113,6 +115,13 @@ public class ReTrace
     public ReTrace(File mappingFile)
     {
         this(REGULAR_EXPRESSION, REGULAR_EXPRESSION2, false, false, mappingFile);
+    }
+
+
+    /** Creates a ReTrace instance with exact-build obfuscated class files. */
+    public ReTrace(File mappingFile, List<File> diagnosticInputs)
+    {
+        this(REGULAR_EXPRESSION, REGULAR_EXPRESSION2, false, false, mappingFile, diagnosticInputs);
     }
 
 
@@ -134,11 +143,25 @@ public class ReTrace
                    boolean verbose,
                    File    mappingFile)
     {
+        this(regularExpression, regularExpression2, allClassNames, verbose, mappingFile,
+             Collections.<File>emptyList());
+    }
+
+
+    /** Creates a ReTrace instance with optional diagnostic JARs or class directories. */
+    public ReTrace(String  regularExpression,
+                   String  regularExpression2,
+                   boolean allClassNames,
+                   boolean verbose,
+                   File    mappingFile,
+                   List<File> diagnosticInputs)
+    {
         this.regularExpression = regularExpression;
         this.regularExpression2 = regularExpression2;
         this.allClassNames     = allClassNames;
         this.verbose           = verbose;
         this.mappingFile       = mappingFile;
+        this.diagnosticInputs  = new ArrayList<File>(diagnosticInputs);
     }
 
 
@@ -160,6 +183,8 @@ public class ReTrace
         // Read the mapping file.
         MappingReader mappingReader = new MappingReader(mappingFile);
         mappingReader.pump(mapper);
+        DiagnosticClassPool diagnosticClasses = diagnosticInputs.isEmpty() ? null :
+            new DiagnosticClassPool(diagnosticInputs);
 
         // Read and process the lines of the stack trace.
         String pendingLine = null;
@@ -178,14 +203,17 @@ public class ReTrace
             if (defaultPatterns)
             {
                 String diagnostic = DiagnosticRemapper.hotspot(obfuscatedLine, mapper);
-                if (DiagnosticRemapper.isHelpfulNullPointer(obfuscatedLine))
+                if (DiagnosticRemapper.isHelpfulException(obfuscatedLine))
                 {
                     pendingLine = stackTraceReader.readLine();
-                    diagnostic = DiagnosticRemapper.helpfulNullPointer(obfuscatedLine, pendingLine, mapper);
+                    diagnostic = DiagnosticRemapper.helpfulException(obfuscatedLine, pendingLine, mapper, diagnosticClasses);
                 }
                 if (diagnostic != null)
                 {
-                    stackTraceWriter.println(allClassNames ? deobfuscateTokens(diagnostic, mapper) : diagnostic);
+                    // Structured diagnostics already remap their class references.
+                    // A second token pass can remap original names a second time
+                    // (and mistake local variable names for obfuscated classes).
+                    stackTraceWriter.println(diagnostic);
                     continue;
                 }
             }
@@ -369,11 +397,19 @@ public class ReTrace
         String  regularExpression2 = REGULAR_EXPRESSION2;
         boolean verbose            = false;
         boolean allClassNames             = false;
+        List<File> diagnosticInputs = new ArrayList<File>();
 
         int argumentIndex = 0;
         while (argumentIndex < args.length)
         {
             String arg = args[argumentIndex];
+            if ((arg.equals(REGEX_OPTION) || arg.equals(INJARS_OPTION)) && argumentIndex + 1 >= args.length)
+            {
+                System.err.println("Missing argument for " + arg);
+                System.err.println(USAGE);
+                System.exit(1);
+                return;
+            }
             if (arg.equals(REGEX_OPTION))
             {
                 regularExpression = args[++argumentIndex];
@@ -385,6 +421,20 @@ public class ReTrace
             else if (arg.equals(VERBOSE_OPTION))
             {
                 verbose = true;
+            }
+            else if (arg.equals(INJARS_OPTION))
+            {
+                String[] paths = args[++argumentIndex].split(java.util.regex.Pattern.quote(File.pathSeparator), -1);
+                for (String path : paths)
+                {
+                    if (path.isEmpty())
+                    {
+                        System.err.println("Empty path in " + INJARS_OPTION);
+                        System.exit(1);
+                        return;
+                    }
+                    diagnosticInputs.add(new File(path));
+                }
             }
             else
             {
@@ -424,7 +474,7 @@ public class ReTrace
             try
             {
                 // Execute ReTrace with the collected settings.
-                new ReTrace(regularExpression, regularExpression2, allClassNames, verbose, mappingFile)
+                new ReTrace(regularExpression, regularExpression2, allClassNames, verbose, mappingFile, diagnosticInputs)
                     .retrace(reader, writer);
             }
             finally
