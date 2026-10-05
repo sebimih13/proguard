@@ -134,6 +134,17 @@ public class FrameRemapper implements MappingProcessor
     /**
      * Transforms the obfuscated frame into one or more original frames,
      * if the frame contains information about a method that can be remapped.
+     *
+     * Behaviour changed from stock ReTrace: when the obfuscated frame
+     * carries a concrete line number, we resolve it to the single method
+     * whose line range actually contains that line, and stop at the first
+     * such match. Methods without line numbers in the mapping (abstract or
+     * native declarations, whose ranges are 0) can never be a real stack
+     * frame, so they are skipped entirely whenever a line number is known.
+     * Only when the frame has no line number do we fall back to the original
+     * behaviour of listing every candidate, since there is then nothing to
+     * disambiguate on.
+     *
      * @param obfuscatedFrame      the obfuscated frame.
      * @param originalMethodFrames the list in which remapped frames can be
      *                             collected.
@@ -160,44 +171,88 @@ public class FrameRemapper implements MappingProcessor
                 String obfuscatedArguments = obfuscatedFrame.getArguments();
                 String originalArguments   = obfuscatedArguments == null ? null :
                     originalArguments(obfuscatedArguments);
-
-                // Find all matching methods.
-                Iterator<MethodInfo> methodInfoIterator = methodSet.iterator();
-                while (methodInfoIterator.hasNext())
+ 
+                // Case 1: we have a concrete line number.
+                // Resolve to the first method whose line range contains it,
+                // ignoring rangeless (abstract / native) declarations.
+                if (obfuscatedLineNumber != 0)
                 {
-                    MethodInfo methodInfo = methodInfoIterator.next();
+                    for (MethodInfo methodInfo : methodSet)
+                    {
+                        if (methodInfo.matchesLine(obfuscatedLineNumber,
+                                                   originalType,
+                                                   originalArguments))
+                        {
+                            // Apply the first match that has line numbers and stop.
+                            originalMethodFrames.add(
+                                originalMethodFrame(obfuscatedFrame, methodInfo));
+                            return;
+                        }
+                    }
+ 
+                    // No method with a matching line range was found. Emit
+                    // nothing here, so transform() falls back to a class-only
+                    // frame (keeping the obfuscated method name) rather than
+                    // listing every rangeless abstract candidate. This also
+                    // surfaces the genuinely useful signal that the concrete
+                    // owner of this line is missing from the mapping.
+                    //
+                    // If you would rather keep the stock "list all candidates"
+                    // behaviour as a fallback here, comment the following return
+                    return;
+                }
+ 
+                // Case 2: no line number to disambiguate on (e.g. native
+                // methods or "Unknown Source"). Keep the original behaviour and
+                // list every candidate.
+                for (MethodInfo methodInfo : methodSet)
+                {
                     if (methodInfo.matches(obfuscatedLineNumber,
                                            originalType,
                                            originalArguments))
                     {
-                        // Do we have a different original first line number?
-                        // We're allowing unknown values, represented as 0.
-                        int lineNumber = obfuscatedFrame.getLineNumber();
-                        if (methodInfo.originalFirstLineNumber != methodInfo.obfuscatedFirstLineNumber)
-                        {
-                            // Do we have an original line number range and
-                            // sufficient information to shift the line number?
-                            lineNumber = methodInfo.originalLastLineNumber    != 0                                  &&
-                                         methodInfo.originalLastLineNumber    != methodInfo.originalFirstLineNumber &&
-                                         methodInfo.obfuscatedFirstLineNumber != 0                                  &&
-                                         lineNumber                           != 0 ?
-                                methodInfo.originalFirstLineNumber - methodInfo.obfuscatedFirstLineNumber + lineNumber :
-                                methodInfo.originalFirstLineNumber;
-                        }
-
-                        originalMethodFrames.add(new FrameInfo(methodInfo.originalClassName,
-                                                               "Unknown Source".equals(obfuscatedFrame.getSourceFile()) ?
-                                                                       "Unknown Source" :
-                                                                       sourceFileName(methodInfo.originalClassName),
-                                                               lineNumber,
-                                                               methodInfo.originalType,
-                                                               obfuscatedFrame.getFieldName(),
-                                                               methodInfo.originalName,
-                                                               methodInfo.originalArguments));
+                        originalMethodFrames.add(
+                            originalMethodFrame(obfuscatedFrame, methodInfo));
                     }
                 }
             }
         }
+    }
+ 
+ 
+    /**
+     * Builds the original (de-obfuscated) frame for the given matched method,
+     * applying ProGuard's line-number shift when the obfuscated and original
+     * line ranges differ. Extracted so both resolution paths in
+     * {@link #transformMethodInfo} share identical frame construction.
+     */
+    private FrameInfo originalMethodFrame(FrameInfo  obfuscatedFrame,
+                                          MethodInfo methodInfo)
+    {
+        // Do we have a different original first line number?
+        // We're allowing unknown values, represented as 0.
+        int lineNumber = obfuscatedFrame.getLineNumber();
+        if (methodInfo.originalFirstLineNumber != methodInfo.obfuscatedFirstLineNumber)
+        {
+            // Do we have an original line number range and
+            // sufficient information to shift the line number?
+            lineNumber = methodInfo.originalLastLineNumber    != 0                                  &&
+                         methodInfo.originalLastLineNumber    != methodInfo.originalFirstLineNumber &&
+                         methodInfo.obfuscatedFirstLineNumber != 0                                  &&
+                         lineNumber                           != 0 ?
+                methodInfo.originalFirstLineNumber - methodInfo.obfuscatedFirstLineNumber + lineNumber :
+                methodInfo.originalFirstLineNumber;
+        }
+ 
+        return new FrameInfo(methodInfo.originalClassName,
+                             "Unknown Source".equals(obfuscatedFrame.getSourceFile()) ?
+                                     "Unknown Source" :
+                                     sourceFileName(methodInfo.originalClassName),
+                             lineNumber,
+                             methodInfo.originalType,
+                             obfuscatedFrame.getFieldName(),
+                             methodInfo.originalName,
+                             methodInfo.originalArguments);
     }
 
 
@@ -439,6 +494,25 @@ public class FrameRemapper implements MappingProcessor
                  obfuscatedLastLineNumber == 0 ||
                 (obfuscatedFirstLineNumber <= obfuscatedLineNumber  &&
                  obfuscatedLineNumber      <= obfuscatedLastLineNumber))                 &&
+                (originalType         == null || originalType.equals(this.originalType)) &&
+                (originalArguments    == null || originalArguments.equals(this.originalArguments));
+        }
+ 
+        /**
+         * Returns whether this method has a real obfuscated line range that
+         * contains the given line number (and matches any supplied type and
+         * arguments). Unlike {@link #matches}, this deliberately does NOT treat
+         * a missing range (obfuscatedLastLineNumber == 0) as a wildcard, so
+         * abstract and native declarations never match a numbered frame.
+         */
+        private boolean matchesLine(int    obfuscatedLineNumber,
+                                    String originalType,
+                                    String originalArguments)
+        {
+            return
+                obfuscatedLastLineNumber  != 0                      &&
+                obfuscatedFirstLineNumber <= obfuscatedLineNumber   &&
+                obfuscatedLineNumber      <= obfuscatedLastLineNumber                    &&
                 (originalType         == null || originalType.equals(this.originalType)) &&
                 (originalArguments    == null || originalArguments.equals(this.originalArguments));
         }
